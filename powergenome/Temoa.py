@@ -611,6 +611,9 @@ def network_reinforcement_cost(
     )
 
     transmission["Line_Reinforcement_Cost_per_MWyr"] = line_inv_cost.round(0)
+    transmission["Line_Reinforcement_Cost_per_MW"] = line_capex.round(0) * transmission["distance_mile"]
+    transmission["WACC"] = line_wacc
+    transmission["Financing_Period"] = line_inv_period
 
     return transmission
 
