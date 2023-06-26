@@ -56,14 +56,12 @@ from powergenome.util import (
     snake_case_col,
     snake_case_str,
 )
-<<<<<<< HEAD
+
 from powergenome.GenX import rename_gen_cols
 from scipy.stats import iqr
 from sklearn import cluster, preprocessing
 from xlrd import XLRDError
 from datetime import datetime as dt
-=======
->>>>>>> develop
 
 logger = logging.getLogger(__name__)
 
