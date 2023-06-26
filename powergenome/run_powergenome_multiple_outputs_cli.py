@@ -9,6 +9,11 @@ from pathlib import Path
 import pandas as pd
 
 import powergenome
+from powergenome.external_data import (
+    insert_user_tx_costs,
+    load_user_tx_costs,
+    make_generator_variability,
+)
 from powergenome.fuels import fuel_cost_table
 from powergenome.generators import (
     GeneratorClusters,
@@ -18,45 +23,40 @@ from powergenome.generators import (
 from powergenome.GenX import (
     add_cap_res_network,
     add_co2_costs_to_o_m,
+    add_misc_gen_values,
+    calculate_partial_CES_values,
     check_resource_tags,
     create_policy_req,
     create_regional_cap_res,
     fix_min_power_values,
     hydro_energy_to_power,
-    min_cap_req,
     max_cap_req,
-    reduce_time_domain,
-    add_misc_gen_values,
+    min_cap_req,
     network_line_loss,
     network_max_reinforcement,
     network_reinforcement_cost,
+    reduce_time_domain,
     round_col_values,
     set_int_cols,
-    calculate_partial_CES_values,
     set_must_run_generation,
 )
 from powergenome.load_profiles import make_final_load_curves
+from powergenome.nrelatb import atb_fixed_var_om_existing
 from powergenome.transmission import (
     agg_transmission_constraints,
     transmission_line_distance,
-)
-from powergenome.nrelatb import atb_fixed_var_om_existing
-from powergenome.external_data import (
-    insert_user_tx_costs,
-    load_user_tx_costs,
-    make_generator_variability,
 )
 from powergenome.util import (
     build_scenario_settings,
     check_settings,
     init_pudl_connection,
+    load_ipm_shapefile,
     load_settings,
-    remove_fuel_scenario_name,
     remove_fuel_gen_scenario_name,
+    remove_fuel_scenario_name,
     update_dictionary,
     write_case_settings_file,
     write_results_file,
-    load_ipm_shapefile,
 )
 
 if not sys.warnoptions:
@@ -176,8 +176,10 @@ def main(**kwargs):
 
     pudl_engine, pudl_out, pg_engine = init_pudl_connection(
         freq="AS",
-        start_year=min(settings.get("data_years")),
-        end_year=max(settings.get("data_years")),
+        start_year=min(settings.get("eia_data_years")),
+        end_year=max(settings.get("eia_data_years")),
+        pudl_db=settings.get("PUDL_DB"),
+        pg_db=settings.get("PG_DB"),
     )
 
     check_settings(settings, pg_engine)

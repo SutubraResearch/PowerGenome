@@ -5,29 +5,26 @@ channels:
 dependencies:
   - python=3.10 # Remove for tox.ini & setup.py
   - pip
-  - conda-forge::catalystcoop.pudl=0.6
+  - conda-forge::catalystcoop.pudl=2022.11.30
   - jupyterlab
   - black
   - pytest
-  - requests
   - beautifulsoup4
-  - lxml
   - pyyaml
   - isort
   - pre-commit
   - conda-forge::nb_conda_kernels
-  - fastparquet
-  - statsmodels
+  - statsmodels>=0.13
   - conda-forge::python-dotenv
   - conda-forge::flatten-dict
   - conda-forge::ruamel.yaml
   - conda-forge::frozendict
   - conda-forge::hypothesis[pandas]
-  - numpy=1.23.*
+  - numpy
   - openpyxl>=3.0
 
   # GIS dependencies from conda-forge
   - conda-forge::fiona
-  - conda-forge::geopandas
+  - conda-forge::geopandas>=0.12
+  - conda-forge::pyogrio
   - conda-forge::shapely
-  - conda-forge::descartes

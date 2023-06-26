@@ -1,26 +1,23 @@
 import collections
-from copy import deepcopy
-import functools
 import itertools
 import logging
+import os
 import re
 import subprocess
-from typing import Dict, List, Tuple, Union
 from collections.abc import Iterable
+from copy import deepcopy
+from pathlib import Path
+from typing import Dict, List, Tuple, Union
 
-import pandas as pd
+os.environ["USE_PYGEOS"] = "0"
 import geopandas as gpd
+import pandas as pd
 import pudl
 import requests
 import sqlalchemy as sa
-
-from flatten_dict import flatten
 import yaml
+from flatten_dict import flatten
 from ruamel.yaml import YAML
-from pathlib import Path
-from frozendict import frozendict
-
-from powergenome.params import IPM_GEOJSON_PATH, SETTINGS
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +59,48 @@ def load_settings(path: Union[str, Path]) -> dict:
 
     settings = apply_all_tag_to_regions(settings)
 
+    for key in ["PUDL_DB", "PG_DB"]:
+        # Add correct connection string prefix if it isn't there
+        if settings.get(key):
+            settings[key] = sqlalchemy_prefix(settings[key])
+
+    for key in [
+        "EFS_DATA",
+        "RESOURCE_GROUPS",
+        "DISTRIBUTED_GEN_DATA",
+        "RESOURCE_GROUP_PROFILES",
+    ]:
+        if settings.get(key):
+            settings[key] = Path(settings[key])
+
     return fix_param_names(settings)
+
+
+def sqlalchemy_prefix(db_path: str) -> str:
+    """Check the database path and add sqlite prefix if needed
+
+    Parameters
+    ----------
+    db_path : str
+        Path to the sqlite database. May or may not include sqlite://// (OS specific)
+
+    Returns
+    -------
+    str
+        SqlAlchemy connection string
+    """
+    if os.name == "nt":
+        # if user is using a windows system
+        sql_prefix = "sqlite:///"
+    else:
+        sql_prefix = "sqlite:////"
+
+    if not db_path:
+        return None
+    if sql_prefix in db_path:
+        return db_path
+    else:
+        return sql_prefix + str(Path(db_path))
 
 
 def apply_all_tag_to_regions(settings: dict) -> dict:
@@ -163,6 +201,7 @@ def fix_param_names(settings: dict) -> dict:
     fix_params = {
         "historical_load_region_maps": "historical_load_region_map",
         "demand_response_resources": "flexible_demand_resources",
+        "data_years": "eia_data_years",
     }
     for k, v in fix_params.items():
         if k in settings:
@@ -424,6 +463,8 @@ def init_pudl_connection(
         object for quickly accessing parts of the database. `pudl_out` is used
         to access unit heat rates.
     """
+    from powergenome.params import SETTINGS
+
     if not pudl_db:
         pudl_db = SETTINGS["PUDL_DB"]
     if not pg_db:
@@ -765,8 +806,7 @@ def build_case_id_name_map(settings: dict) -> dict:
     case_id_name_df = pd.read_csv(
         Path(settings["input_folder"]) / settings["case_id_description_fn"],
         index_col=0,
-        squeeze=True,
-    )
+    ).squeeze("columns")
     case_id_name_df = case_id_name_df.str.replace(" ", "_")
     case_id_name_map = case_id_name_df.to_dict()
 
@@ -919,7 +959,7 @@ def remove_feb_29(df: pd.DataFrame) -> pd.DataFrame:
     return df.drop(columns=["datetime"])
 
 
-def load_ipm_shapefile(settings: dict, path: Union[str, Path] = IPM_GEOJSON_PATH):
+def load_ipm_shapefile(settings: dict, path: Union[str, Path] = None):
     """
     Load the shapefile of IPM regions
 
@@ -937,11 +977,17 @@ def load_ipm_shapefile(settings: dict, path: Union[str, Path] = IPM_GEOJSON_PATH
     geodataframe
         Regions to use in the study with the matching geometry for each.
     """
+    if not path:
+        from powergenome.params import IPM_GEOJSON_PATH
+
+        path = IPM_GEOJSON_PATH
     keep_regions, region_agg_map = regions_to_keep(
         settings["model_regions"], settings.get("region_aggregations", {}) or {}
     )
-
-    ipm_regions = gpd.read_file(path)
+    try:
+        ipm_regions = gpd.read_file(path, engine="pyogrio")
+    except ImportError:
+        ipm_regions = gpd.read_file(path, engine="fiona")
     ipm_regions = ipm_regions.rename(columns={"IPM_Region": "region"})
 
     if settings.get("user_region_geodata_fn"):
@@ -970,7 +1016,8 @@ def deep_freeze(thing):
     """
     https://stackoverflow.com/a/66729248/3393071
     """
-    from collections.abc import Collection, Mapping, Hashable
+    from collections.abc import Collection, Hashable, Mapping
+
     from frozendict import frozendict
 
     if thing is None or isinstance(thing, str):
