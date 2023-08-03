@@ -2809,12 +2809,15 @@ class GeneratorClusters:
         self.pg_engine = pg_engine
         self.settings = settings
         self.current_gens = current_gens
+        if self.settings.get("num_clusters") is None:
+            self.current_gens = False
         self.sort_gens = sort_gens
         self.model_regions_gdf = load_ipm_shapefile(self.settings)
         self.weighted_unit_hr = None
         self.supplement_with_860m = supplement_with_860m
         self.cluster_builder = build_resource_clusters(
-            self.settings.get("RESOURCE_GROUPS")
+            self.settings.get("RESOURCE_GROUPS"),
+            self.settings.get("RESOURCE_GROUP_PROFILES"),
         )
 
         if self.current_gens:
