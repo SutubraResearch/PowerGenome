@@ -7,7 +7,7 @@ import subprocess
 from collections.abc import Iterable
 from copy import deepcopy
 from pathlib import Path
-from typing import Dict, List, Tuple, Union
+from typing import Any, Dict, List, Tuple, Union
 
 os.environ["USE_PYGEOS"] = "0"
 import geopandas as gpd
@@ -58,6 +58,7 @@ def load_settings(path: Union[str, Path]) -> dict:
         settings["input_folder"] = path.parent / settings["input_folder"]
 
     settings = apply_all_tag_to_regions(settings)
+    settings = sort_nested_dict(settings)
 
     for key in ["PUDL_DB", "PG_DB"]:
         # Add correct connection string prefix if it isn't there
@@ -74,6 +75,33 @@ def load_settings(path: Union[str, Path]) -> dict:
             settings[key] = Path(settings[key])
 
     return fix_param_names(settings)
+
+
+def sort_nested_dict(d: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Given a nested dictionary, iterate through all levels to sort keys by length.
+    Dictionary values can be more nested dictionaries, strings, numbers, or lists.
+
+    Parameters
+    ----------
+    d : Dict[str, Any]
+        The nested dictionary to be sorted.
+
+    Returns
+    -------
+    Dict[str, Any]
+        The sorted dictionary where keys are sorted by length at each level.
+
+    """
+    sorted_dict = dict()
+
+    for key, value in sorted(d.items(), key=lambda x: len(str(x[0]))):
+        if isinstance(value, dict):
+            sorted_dict[key] = sort_nested_dict(value)
+        else:
+            sorted_dict[key] = value
+
+    return sorted_dict
 
 
 def sqlalchemy_prefix(db_path: str) -> str:
@@ -439,6 +467,14 @@ def check_settings(settings: dict, pg_engine: sa.engine) -> None:
             )
             settings["growth_scenario"] = f"REF{load_aeo_year}"
 
+    if not settings.get("interest_compound_method"):
+        logger.info(
+            "The default interest compounding method for calculating annuities has "
+            "changed from continuous to discrete. This method can be set with the parameter "
+            "'interest_compound_method', using values `discrete` or `continuous`.\n"
+            "This message will be removed after version 0.7.0."
+        )
+
 
 def init_pudl_connection(
     freq: str = "AS",
@@ -626,10 +662,26 @@ def download_save(url: str, save_path: Union[str, Path]):
 def update_dictionary(d: dict, u: dict) -> dict:
     """
     Update keys in an existing dictionary (d) with values from u
+    Sort keys in updated dictionary by their lengths from shortest to longest
 
-    https://stackoverflow.com/a/32357112
+    Parameters
+    ----------
+    d : dict
+        The existing dictionary to be updated.
+    u : dict
+        The dictionary containing the new values to update the existing dictionary.
+
+    Returns
+    -------
+    dict
+        The updated dictionary with keys sorted by length.
     """
-    for k, v in u.items():
+    if not (isinstance(d, collections.abc.Mapping) or d is None) or not isinstance(
+        u, collections.abc.Mapping
+    ):
+        raise TypeError("Inputs must be dictionaries")
+
+    for k, v in sorted(u.items(), key=lambda item: len(item[0])):
         if isinstance(d, collections.abc.Mapping):
             if isinstance(v, collections.abc.Mapping):
                 r = update_dictionary(d.get(k, {}), v)
@@ -638,7 +690,7 @@ def update_dictionary(d: dict, u: dict) -> dict:
                 d[k] = u[k]
         else:
             d = {k: u[k]}
-    return d
+    return dict(sorted(d.items(), key=lambda item: len(item[0])))
 
 
 def remove_fuel_scenario_name(df, settings):
@@ -854,8 +906,10 @@ def build_scenario_settings(
             "either the key 'model_periods' (a list of 2-element lists) or the keys "
             "'model_year' and 'model_first_planning_year' (each a list of years)."
         )
-
-    case_id_name_map = build_case_id_name_map(settings)
+    if settings.get("case_id_description_fn"):
+        case_id_name_map = build_case_id_name_map(settings)
+    else:
+        case_id_name_map = None
 
     scenario_settings = {}
     for year in model_planning_period_dict.keys():
@@ -929,7 +983,8 @@ def build_scenario_settings(
 
             _settings["model_first_planning_year"] = model_planning_period_dict[year][0]
             _settings["model_year"] = model_planning_period_dict[year][1]
-            _settings["case_name"] = case_id_name_map[case_id]
+            if settings.get("case_id_description_fn"):
+                _settings["case_name"] = case_id_name_map[case_id]
             scenario_settings[year][case_id] = _settings
 
     return scenario_settings

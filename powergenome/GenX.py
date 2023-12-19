@@ -14,9 +14,14 @@ from powergenome.external_data import (
     make_generator_variability,
 )
 from powergenome.load_profiles import make_distributed_gen_profiles
-from powergenome.nrelatb import investment_cost_calculator
+from powergenome.financials import investment_cost_calculator
 from powergenome.time_reduction import kmeans_time_clustering
-from powergenome.util import find_region_col, load_settings, snake_case_col
+from powergenome.util import (
+    find_region_col,
+    load_settings,
+    snake_case_col,
+    snake_case_str,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -392,10 +397,10 @@ def add_misc_gen_values(
             )
     generic_resources = []
     for gen_resource in gen_clusters[resource_col].unique():
-        for r in settings["model_regions"]:
+        for r in sorted(settings["model_regions"])[::-1]:
             if r in gen_resource:
                 gen_resource = gen_resource.replace(r + "_", "")
-                generic_resources.append(gen_resource)
+                generic_resources.append(snake_case_str(gen_resource))
                 continue
     generic_resources = set(generic_resources)
     missing_resources = []
@@ -423,7 +428,11 @@ def add_misc_gen_values(
         row_cols = row[value_cols].dropna().index
         gen_clusters.loc[
             (gen_clusters["region"] == row[region_col])
-            & (gen_clusters[resource_col].str.contains(row[resource_col], case=False)),
+            & (
+                snake_case_col(gen_clusters[resource_col]).str.contains(
+                    row[resource_col], case=False
+                )
+            ),
             row_cols,
         ] = row[row_cols].values
     return gen_clusters
@@ -607,7 +616,12 @@ def network_reinforcement_cost(
             "investment_years. See the `test_settings.yml` file for an example."
         )
     line_inv_cost = (
-        investment_cost_calculator(line_capex, line_wacc, line_inv_period)
+        investment_cost_calculator(
+            line_capex,
+            line_wacc,
+            line_inv_period,
+            settings.get("interest_compound_method", "discrete"),
+        )
         * transmission["distance_mile"]
     )
 

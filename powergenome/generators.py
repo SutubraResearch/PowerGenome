@@ -32,6 +32,7 @@ from powergenome.external_data import (
     demand_response_resource_capacity,
     make_demand_response_profiles,
 )
+from powergenome.financials import investment_cost_calculator
 from powergenome.GenX import rename_gen_cols
 from powergenome.load_profiles import make_distributed_gen_profiles
 from powergenome.nrelatb import (
@@ -40,7 +41,6 @@ from powergenome.nrelatb import (
     fetch_atb_costs,
     fetch_atb_heat_rates,
     fetch_atb_offshore_spur_costs,
-    investment_cost_calculator,
 )
 from powergenome.params import DATA_PATHS, IPM_GEOJSON_PATH, build_resource_clusters
 from powergenome.price_adjustment import inflation_price_adjustment
@@ -55,6 +55,7 @@ from powergenome.util import (
     reverse_dict_of_lists,
     snake_case_col,
     snake_case_str,
+    sort_nested_dict,
 )
 
 from powergenome.GenX import rename_gen_cols
@@ -462,7 +463,7 @@ def load_plant_region_map(
 
     model_region_map_df = region_map_df.loc[
         region_map_df.region.isin(keep_regions), :
-    ].drop(columns="id")
+    ].drop(columns="id", errors="ignore")
 
     model_region_map_df = map_agg_region_names(
         df=model_region_map_df,
@@ -1449,7 +1450,10 @@ def add_genx_model_tags(df, settings):
             settings["generator_columns"].append(tag_col)
 
         try:
-            for tech, tag_value in settings["model_tag_values"][tag_col].items():
+            for tech, tag_value in sorted(
+                settings["model_tag_values"][tag_col].items(),
+                key=lambda item: len(item[0]),
+            ):
                 tech = re.sub(ignored, "", tech)
                 mask = technology.str.contains(rf"^{tech}", case=False)
                 df.loc[mask, tag_col] = tag_value
@@ -1457,7 +1461,9 @@ def add_genx_model_tags(df, settings):
             logger.warning(f"No model tag values found for {tag_col} ({e})")
 
     # Change tags with specific regional values for a technology
-    flat_regional_tags = flatten(settings.get("regional_tag_values", {}) or {})
+    flat_regional_tags = flatten(
+        sort_nested_dict(settings.get("regional_tag_values", {}) or {})
+    )
 
     for tag_tuple, tag_value in flat_regional_tags.items():
         region, tag_col, tech = tag_tuple
@@ -2444,7 +2450,10 @@ def calculate_transmission_inv_cost(resource_df, settings, offshore_spur_costs=N
             capex_mw_mile.fillna(0) * resource_df[f"{ttype}_miles"]
         )
         resource_df[f"{ttype}_inv_mwyr"] = investment_cost_calculator(
-            resource_df[f"{ttype}_capex"], params["wacc"], params["investment_years"]
+            resource_df[f"{ttype}_capex"],
+            params["wacc"],
+            params["investment_years"],
+            settings.get("interest_compound_method", "discrete"),
         )
     return resource_df
 
@@ -2941,8 +2950,8 @@ class GeneratorClusters:
                 "for this planning period. No flexible demand resources will be included."
             )
         for resource, parameters in (
-            self.settings["flexible_demand_resources"].get(year, {}).items()
-        ):
+            self.settings["flexible_demand_resources"].get(year, {}) or {}
+        ).items():
             _df = pd.DataFrame(
                 index=self.settings["model_regions"],
                 columns=list(self.settings["generator_columns"]) + ["profile"],
