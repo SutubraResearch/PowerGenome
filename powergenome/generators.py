@@ -1418,7 +1418,7 @@ def calc_unit_cluster_values(
         Aggragate values for generators in a technology cluster
     """
     # if not clustering units no need to calulate cluster average values
-    if df["cluster"].max() == len(df):
+    if df["cluster"].nunique() == len(df):
         df["Min_Power"] = df["minimum_load_mw"] / df[capacity_col]
         df["num_units"] = 1
         if technology:
@@ -3650,6 +3650,17 @@ class GeneratorClusters:
             + "_"
             + self.results["cluster"].astype(str)
         )
+        if self.results["Resource"].nunique() != len(self.results):
+            dup_resources = (
+                self.results[self.results["Resource"].duplicated()]
+                .drop_duplicates()
+                .to_list()
+            )
+            raise ValueError(
+                f"The generator resource names {dup_resources} have duplicates. These "
+                "names should be unique. You'll probably need to file an issue for this "
+                "at https://github.com/PowerGenome/PowerGenome/issues."
+            )
 
         # Add variable resource profiles
         self.results = self.results.reset_index(drop=True)
