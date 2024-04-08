@@ -13,8 +13,8 @@ from powergenome.external_data import (
     load_user_genx_settings,
     make_generator_variability,
 )
-from powergenome.load_profiles import make_distributed_gen_profiles
 from powergenome.financials import investment_cost_calculator
+from powergenome.load_profiles import make_distributed_gen_profiles
 from powergenome.time_reduction import kmeans_time_clustering
 from powergenome.util import (
     find_region_col,
@@ -112,9 +112,9 @@ def create_policy_req(settings: dict, col_str_match: str) -> pd.DataFrame:
         for region, col in product(
             year_case_policy["region"].unique(), year_case_policy[policy_cols].columns
         ):
-            zone_df.loc[
-                zone_df["Region_description"] == region, col
-            ] = year_case_policy.loc[year_case_policy.region == region, col].values[0]
+            zone_df.loc[zone_df["Region_description"] == region, col] = (
+                year_case_policy.loc[year_case_policy.region == region, col].values[0]
+            )
 
     # zone_df = zone_df.drop(columns="region")
 
@@ -322,9 +322,9 @@ def add_emission_policies(transmission_df, settings):
         for region, col in product(
             year_case_policy["region"].unique(), year_case_policy.columns
         ):
-            zone_df.loc[
-                zone_df["Region description"] == region, col
-            ] = year_case_policy.loc[year_case_policy.region == region, col].values[0]
+            zone_df.loc[zone_df["Region description"] == region, col] = (
+                year_case_policy.loc[year_case_policy.region == region, col].values[0]
+            )
 
     zone_df = zone_df.drop(columns="region")
 
@@ -1172,9 +1172,9 @@ def hydro_energy_to_power(
             avg_inflow = (
                 make_generator_variability(df).mean().reset_index(drop=True) * factor
             ).loc[hydro_mask & region_mask]
-            df.loc[
-                (df["HYDRO"] == 1) & region_mask, "Hydro_Energy_to_Power_Ratio"
-            ] = avg_inflow.where(avg_inflow > 1, 1)
+            df.loc[(df["HYDRO"] == 1) & region_mask, "Hydro_Energy_to_Power_Ratio"] = (
+                avg_inflow.where(avg_inflow > 1, 1)
+            )
     df["Hydro_Energy_to_Power_Ratio"] = df["Hydro_Energy_to_Power_Ratio"].fillna(0)
     return df
 
@@ -1228,12 +1228,30 @@ def add_co2_costs_to_o_m(df: pd.DataFrame) -> pd.DataFrame:
         costs
     """
     if "co2_cost_mwh" in df.columns:
-        df["Var_OM_Cost_per_MWh"] += df["co2_cost_mwh"]
+        df["Var_OM_Cost_per_MWh"] += df["co2_cost_mwh"].fillna(0)
     if "co2_pipeline_annuity_mw" in df.columns:
-        df["Inv_Cost_per_MWyr"] += df["co2_pipeline_annuity_mw"]
+        df["Inv_Cost_per_MWyr"] += df["co2_pipeline_annuity_mw"].fillna(0)
     if "co2_o_m_mw" in df.columns:
-        df["Fixed_OM_Cost_per_MWyr"] += df["co2_o_m_mw"]
+        df["Fixed_OM_Cost_per_MWyr"] += df["co2_o_m_mw"].fillna(0)
     if "co2_pipeline_capex_mw" in df.columns:
-        df["capex_mw"] += df["co2_pipeline_capex_mw"]
+        df["capex_mw"] += df["co2_pipeline_capex_mw"].fillna(0)
 
     return df
+
+
+def cap_retire_within_period(
+    gens: pd.DataFrame, first_year: int, last_year: int, capacity_col: str
+) -> pd.Series:
+    retired_cap = (
+        gens.query("retirement_year <= @last_year and retirement_year >= @first_year")
+        .groupby("Resource", as_index=False)[[capacity_col, "capacity_mwh"]]
+        .sum()
+    ).rename(
+        columns={
+            capacity_col: "Min_Retired_Cap_MW",
+            "capacity_mwh": "Min_Retired_Energy_Cap_MW",
+        }
+    )
+    retired_cap["Min_Retired_Charge_Cap_MW"] = 0
+
+    return retired_cap

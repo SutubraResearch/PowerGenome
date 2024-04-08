@@ -118,12 +118,16 @@ def fuel_cost_table(
     fuel_df["CO2_content_tons_per_MMBtu"] = fuel_df["Fuel"].map(fuel_emission_map)
 
     # Slow to loop through all of the rows this way but the df shouldn't be too long
+    if settings.get("co2_pipeline_filters") and settings.get("co2_pipeline_cost_fn"):
+        ccs_disposal_cost = 0
+    else:
+        ccs_disposal_cost = settings.get("ccs_disposal_cost", 0)
     fuel_df = fuel_df.apply(
         adjust_ccs_fuels,
         axis=1,
         ccs_fuels=(settings.get("ccs_fuel_map", {}) or {}).values(),
         ccs_capture_rate=(settings.get("ccs_capture_rate", {}) or {}),
-        ccs_disposal_cost=settings.get("ccs_disposal_cost", 0),
+        ccs_disposal_cost=ccs_disposal_cost,
     )
     fuel_df = add_carbon_tax(fuel_df, settings.get("carbon_tax"))
     fuel_df["Cost_per_MMBtu"] = fuel_df["Cost_per_MMBtu"]
@@ -215,7 +219,7 @@ def adjust_ccs_fuels(
                 "You did not specify a CCS disposal cost, so it will be set to $0. "
                 "Set a non-zero value with the settings parameter 'ccs_disposal_cost'."
             )
-            disposal_cost = 0
+            ccs_disposal_cost = 0
 
         capture_rate = ccs_capture_rate.get(base_fuel_name, 0)
 

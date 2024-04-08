@@ -14,7 +14,11 @@ import pandas as pd
 import sqlalchemy
 from joblib import Parallel, delayed
 
-from powergenome.cluster.renewables import assign_site_cluster, calc_cluster_values
+from powergenome.cluster.renewables import (
+    assign_site_cluster,
+    calc_cluster_values,
+    modify_renewable_group,
+)
 from powergenome.financials import investment_cost_calculator
 from powergenome.params import DATA_PATHS, SETTINGS, build_resource_clusters
 from powergenome.price_adjustment import inflation_price_adjustment
@@ -25,7 +29,9 @@ from powergenome.resource_clusters import (
     map_nrel_atb_technology,
 )
 from powergenome.util import (
+    add_row_to_csv,
     apply_all_tag_to_regions,
+    hash_string_sha256,
     remove_leading_zero,
     reverse_dict_of_lists,
     snake_case_col,
@@ -588,9 +594,9 @@ def atb_fixed_var_om_existing(
     if not mod_results.loc[mod_results["Fixed_OM_Cost_per_MWyr"].isna()].empty:
         df_list = []
         for tech, _df in mod_results.groupby("technology"):
-            _df.loc[
-                _df["Fixed_OM_Cost_per_MWyr"].isna(), "Fixed_OM_Cost_per_MWyr"
-            ] = _df["Fixed_OM_Cost_per_MWyr"].mean()
+            _df.loc[_df["Fixed_OM_Cost_per_MWyr"].isna(), "Fixed_OM_Cost_per_MWyr"] = (
+                _df["Fixed_OM_Cost_per_MWyr"].mean()
+            )
             df_list.append(_df)
         mod_results = pd.concat(df_list, ignore_index=True)
         mod_results.loc[
@@ -877,9 +883,9 @@ def calc_om(
                 )
 
                 # If nuclear heat rates are NaN, set them to new build value
-                _df.loc[
-                    _df["heat_rate_mmbtu_mwh"].isna(), "heat_rate_mmbtu_mwh"
-                ] = new_build_hr
+                _df.loc[_df["heat_rate_mmbtu_mwh"].isna(), "heat_rate_mmbtu_mwh"] = (
+                    new_build_hr
+                )
                 _df["Var_OM_Cost_per_MWh"] = atb_var_om_mwh * (
                     _df["heat_rate_mmbtu_mwh"].mean() / new_build_hr
                 )
@@ -1311,7 +1317,7 @@ def atb_new_generators(atb_costs, atb_hr, settings, cluster_builder=None):
             "Fixed_OM_Cost_per_MWhyr",
             "Inv_Cost_per_MWyr",
             "Inv_Cost_per_MWhyr",
-            "cluster",
+            # "cluster",
         ]
         int_cols = [c for c in int_cols if c in results.columns]
         results = results.fillna(0)
@@ -1558,16 +1564,26 @@ def add_renewables_clusters(
                     "bin",
                     "group",
                     "cluster",
+                    "group_modifiers",
                 ]
             ]
         )
-        detail_suffix = flatten_cluster_def(_scenario, "_")
-        cache_cluster_fn = f"{region}_{technology}_{detail_suffix}_cluster_data.parquet"
-        cache_site_assn_fn = f"{region}_{technology}_{detail_suffix}_site_assn.parquet"
+        detail_suffix = flatten_cluster_def(
+            {k: v for (k, v) in _scenario.items() if k != "group_modifiers"}, "_"
+        )
+        unique_hash = hash_string_sha256(f"{region}_{technology}_{detail_suffix}")
+        cache_cluster_fn = unique_hash + "_cluster_data.parquet"
+        cache_site_assn_fn = unique_hash + "_site_assn.parquet"
+
         sub_folder = settings.get("RESOURCE_GROUPS") or SETTINGS.get("RESOURCE_GROUPS")
         sub_folder = str(sub_folder).replace("/", "_").replace("\\", "_")
         cache_folder = Path(
             settings["input_folder"] / "cluster_assignments" / sub_folder
+        )
+        add_row_to_csv(
+            cache_folder / "hash_map.csv",
+            headers=["name", "hash"],
+            new_row=[f"{region}_{technology}_{detail_suffix}", unique_hash],
         )
         cache_cluster_fpath = cache_folder / cache_cluster_fn
         cache_site_assn_fpath = cache_folder / cache_site_assn_fn
@@ -1576,7 +1592,14 @@ def add_renewables_clusters(
                 clusters = pd.read_parquet(cache_cluster_fpath)
                 data = pd.read_parquet(cache_site_assn_fpath)
             else:
-                drop_keys = ["min_capacity", "filter", "bin", "group", "cluster"]
+                drop_keys = [
+                    "min_capacity",
+                    "filter",
+                    "bin",
+                    "group",
+                    "cluster",
+                    "group_modifiers",
+                ]
                 group_kwargs = dict(
                     [(k, v) for k, v in _scenario.items() if k not in drop_keys]
                 )
@@ -1608,7 +1631,7 @@ def add_renewables_clusters(
                     continue
                 clusters = (
                     data.groupby("cluster", as_index=False)
-                    .apply(calc_cluster_values)
+                    .apply(calc_cluster_values, _scenario.get("group"))
                     .rename(columns={"mw": "Max_Cap_MW"})
                     .assign(technology=technology, region=region)
                 )
@@ -1653,7 +1676,7 @@ def add_renewables_clusters(
         if _scenario.get("min_capacity"):
             # Warn if total capacity less than expected
             capacity = clusters["Max_Cap_MW"].sum()
-            if capacity < scenario["min_capacity"]:
+            if capacity < _scenario["min_capacity"]:
                 logger.warning(
                     f"Selected technology {_scenario['technology']} capacity"
                     + f" in region {region}"
@@ -1662,7 +1685,11 @@ def add_renewables_clusters(
         row = df[df["technology"] == technology].to_dict("records")[0]
         clusters["technology"] = clusters["technology"] + new_tech_suffix
         kwargs = {k: v for k, v in row.items() if k not in clusters}
-        cdfs.append(clusters.assign(**kwargs))
+        cdfs.append(
+            clusters.assign(**kwargs).pipe(
+                modify_renewable_group, _scenario.get("group_modifiers")
+            )
+        )
     return pd.concat([df[~mask]] + cdfs, sort=False)
 
 
