@@ -6,9 +6,8 @@ from typing import Dict, List
 
 import pandas as pd
 
-from powergenome.params import DATA_PATHS
 from powergenome.price_adjustment import inflation_price_adjustment
-from powergenome.util import snake_case_col, snake_case_str
+from powergenome.util import snake_case_str
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +60,7 @@ def merge_co2_pipeline_costs(
         The input dataframe (one row per resource) plus columns with cost data for CO2
         pipeline constuction/operation and CO2 disposal
     """
+    logger.info("Adding CCS pipeline costs")
     co2_df = pd.read_csv(co2_data_path)
     co2_df = co2_df.loc[co2_df["parameter"] != "capacity_mw", :]
     if target_usd_year:

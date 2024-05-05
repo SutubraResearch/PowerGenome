@@ -1,5 +1,4 @@
 import argparse
-import copy
 import logging
 import shutil
 import sys
@@ -15,17 +14,13 @@ from powergenome.external_data import (
     make_generator_variability,
 )
 from powergenome.fuels import fuel_cost_table
-from powergenome.generators import (
-    GeneratorClusters,
-    add_fuel_labels,
-    add_genx_model_tags,
-)
+from powergenome.generators import GeneratorClusters
 from powergenome.GenX import (
     add_cap_res_network,
     add_co2_costs_to_o_m,
     add_misc_gen_values,
-    calculate_partial_CES_values,
     check_resource_tags,
+    check_vre_profiles,
     create_policy_req,
     create_regional_cap_res,
     fix_min_power_values,
@@ -41,7 +36,6 @@ from powergenome.GenX import (
     set_must_run_generation,
 )
 from powergenome.load_profiles import make_final_load_curves
-from powergenome.nrelatb import atb_fixed_var_om_existing
 from powergenome.transmission import (
     agg_transmission_constraints,
     transmission_line_distance,
@@ -54,7 +48,6 @@ from powergenome.util import (
     load_settings,
     remove_fuel_gen_scenario_name,
     remove_fuel_scenario_name,
-    update_dictionary,
     write_case_settings_file,
     write_results_file,
 )
@@ -163,20 +156,34 @@ def main(**kwargs):
 
     # Create a logger to output any messages we might have...
     logger = logging.getLogger(powergenome.__name__)
-    logger.setLevel(logging.INFO)
+    logger.setLevel(logging.DEBUG)
     handler = logging.StreamHandler()
-    formatter = logging.Formatter(
+    stream_formatter = logging.Formatter(
+        # More extensive test-like formatter...
+        "%(asctime)s [%(levelname)8s] %(name)s:%(lineno)s %(message)s",
+        # This is the datetime format string.
+        "%H:%M:%S",
+    )
+    handler.setFormatter(stream_formatter)
+    handler.setLevel(logging.INFO)
+    logger.addHandler(handler)
+
+    file_formatter = logging.Formatter(
         # More extensive test-like formatter...
         "%(asctime)s [%(levelname)8s] %(name)s:%(lineno)s %(message)s",
         # This is the datetime format string.
         "%Y-%m-%d %H:%M:%S",
     )
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
-
     filehandler = logging.FileHandler(out_folder / "log.txt")
-    filehandler.setFormatter(formatter)
+    filehandler.setLevel(logging.DEBUG)
+    filehandler.setFormatter(file_formatter)
     logger.addHandler(filehandler)
+
+    if not args.multi_period:
+        logger.info(
+            "As of version 0.6.2 the --multi-period/-mp flag can be used to format inputs "
+            "for multi-stage modeling in GenX."
+        )
 
     logger.info("Reading settings file")
     settings = load_settings(path=args.settings_file)
@@ -189,7 +196,7 @@ def main(**kwargs):
             args.settings_file, out_folder / "pg_settings", dirs_exist_ok=True
         )
 
-    logger.info("Initiating PUDL connections")
+    logger.debug("Initiating PUDL connections")
 
     pudl_engine, pudl_out, pg_engine = init_pudl_connection(
         freq="AS",
@@ -221,12 +228,12 @@ def main(**kwargs):
     # Sort zones in the settings to make sure they are correctly sorted everywhere.
     settings["model_regions"] = sorted(settings["model_regions"])
     zones = settings["model_regions"]
-    logger.info(f"Sorted zones are {', '.join(zones)}")
+    logger.info(f"Sorted model regions are {', '.join(zones)}")
     zone_num_map = {
         zone: f"{number + 1}" for zone, number in zip(zones, range(len(zones)))
     }
 
-    input_folder = Path(args.settings_file).parent / settings["input_folder"]
+    input_folder = Path(args.settings_file).parent / Path(settings["input_folder"]).name
     settings["input_folder"] = input_folder
 
     scenario_definitions = pd.read_csv(
@@ -291,7 +298,7 @@ def main(**kwargs):
                     )
             _settings["extra_outputs"] = case_folder / "extra_outputs"
             _settings["extra_outputs"].mkdir(parents=True, exist_ok=True)
-            logger.info(f"Starting year {year} scenario {case_id}\n")
+            logger.info(f"\n\nStarting year {year} scenario {case_id}\n\n")
             if args.gens:
                 gc = GeneratorClusters(
                     pudl_engine=pudl_engine,
@@ -327,10 +334,6 @@ def main(**kwargs):
                     _settings.get("regional_hydro_factor", {}),
                 )
 
-                # Save existing resources that aren't demand response for use in
-                # other cases
-                existing_gens = gc.existing_resources.copy()
-
                 gen_variability = make_generator_variability(gen_clusters)
                 gen_variability.index.name = "Time_Index"
                 gen_variability.columns = gen_clusters["Resource"]
@@ -344,10 +347,12 @@ def main(**kwargs):
                 gens = fix_min_power_values(gen_clusters, gen_variability).pipe(
                     add_co2_costs_to_o_m
                 )
+                check_vre_profiles(gens, gen_variability)
                 for col in _settings["generator_columns"]:
                     if col not in gens.columns:
                         gens[col] = 0
 
+                # Some extra fixes for multi-period
                 gens = gens.rename(
                     columns={
                         "cap_recovery_years": "Capital_Recovery_Period",
@@ -355,7 +360,9 @@ def main(**kwargs):
                     }
                 )
                 gens["Lifetime"] = gens["Capital_Recovery_Period"]
-                gens.loc[gens["Lifetime"] == 0, "Lifetime"] = 50
+                gens.loc[
+                    (gens["Lifetime"] == 0) | (gens["Lifetime"].isna()), "Lifetime"
+                ] = 50
                 cols = [c for c in _settings["generator_columns"] if c in gens]
                 cols.extend(["Capital_Recovery_Period", "WACC", "Lifetime"])
                 write_results_file(
@@ -474,9 +481,16 @@ def main(**kwargs):
 
                 cap_res = create_regional_cap_res(_settings)
 
-                network["Line_Max_Flow_Possible_MW"] = 1e6
-                network["Capital_Recovery_Period"] = 60
-                network["WACC"] = 0.044
+                if args.multi_period:
+                    for line in network["Network_Lines"].dropna():
+                        network.loc[
+                            network["Network_Lines"] == line,
+                            "Line_Max_Flow_Possible_MW",
+                        ] = 1e6
+                        network.loc[
+                            network["Network_Lines"] == line, "Capital_Recovery_Period"
+                        ] = 60
+                        network.loc[network["Network_Lines"] == line, "WACC"] = 0.044
                 write_results_file(
                     df=network,
                     folder=case_folder,

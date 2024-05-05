@@ -10,18 +10,11 @@ import pandas as pd
 from powergenome.external_data import (
     load_demand_segments,
     load_policy_scenarios,
-    load_user_genx_settings,
     make_generator_variability,
 )
 from powergenome.financials import investment_cost_calculator
-from powergenome.load_profiles import make_distributed_gen_profiles
 from powergenome.time_reduction import kmeans_time_clustering
-from powergenome.util import (
-    find_region_col,
-    load_settings,
-    snake_case_col,
-    snake_case_str,
-)
+from powergenome.util import find_region_col, snake_case_col, snake_case_str
 
 logger = logging.getLogger(__name__)
 
@@ -191,9 +184,9 @@ def label_cap_res_lines(path_names: List[str], dest_regions: List[str]) -> List[
     for name in path_names:
         s_r = name.split("_to_")[0]
         e_r = name.split("_to_")[-1]
-        if (s_r in dest_regions) and not (e_r in dest_regions):
+        if (s_r in dest_regions) and e_r not in dest_regions:
             cap_res_list.append(1)
-        elif (e_r in dest_regions) and not (s_r in dest_regions):
+        elif (e_r in dest_regions) and s_r not in dest_regions:
             cap_res_list.append(-1)
         else:
             cap_res_list.append(0)
@@ -231,10 +224,6 @@ def add_cap_res_network(tx_df: pd.DataFrame, settings: dict) -> pd.DataFrame:
         tx_df["transmission_path_name"] = tx_df["Transmission Path Name"]
     original_cols = tx_df.columns.to_list()
 
-    zones = settings["model_regions"]
-    zone_num_map = {
-        zone: f"z{number + 1}" for zone, number in zip(zones, range(len(zones)))
-    }
     path_names = tx_df["transmission_path_name"].to_list()
     policy_nums = []
 
@@ -366,7 +355,9 @@ def add_misc_gen_values(
     except ValueError:
         region_col = "region"
         misc_values["region"] = "all"
-    regions = [r for r in misc_values[region_col].unique() if r.lower() != "all"]
+    regions = [
+        r for r in misc_values[region_col].fillna("all").unique() if r.lower() != "all"
+    ]
     wrong_regions = [r for r in regions if r not in settings["model_regions"]]
     if wrong_regions:
         raise ValueError(
@@ -381,7 +372,6 @@ def add_misc_gen_values(
 
     misc_values = misc_values.loc[misc_values[region_col].str.lower() != "all", :]
 
-    resource_len = 0
     for tech, _df in misc_values.groupby(resource_col):
         num_tech_regions = len(
             gen_clusters.loc[
@@ -457,6 +447,7 @@ def reduce_time_domain(
             include_peak_day=include_peak_day,
             load_weight=load_weight,
             variable_resources_only=variable_resources_only,
+            n_init=settings.get("tdr_n_init", 100),
         )
 
         reduced_resource_profile = results["resource_profiles"]
@@ -541,7 +532,7 @@ def network_line_loss(transmission: pd.DataFrame, settings: dict) -> pd.DataFram
     elif "distance_km" in transmission.columns:
         distance_col = "distance_km"
         loss_per_100_miles *= 0.62137
-        logger.info("Line loss per 100 miles was converted to km.")
+        logger.debug("Line loss per 100 miles was converted to km.")
     else:
         raise KeyError("No distance column is available in the transmission dataframe")
 
@@ -947,7 +938,7 @@ def fix_min_power_values(
     gen_profile_min = _gen_profile.min().reset_index(drop=True)
     mask = (resource_df[min_power_col].fillna(0) > gen_profile_min).values
 
-    logger.info(
+    logger.debug(
         f"{sum(mask)} resources have {min_power_col} larger than hourly generation."
     )
 
@@ -1255,3 +1246,36 @@ def cap_retire_within_period(
     retired_cap["Min_Retired_Charge_Cap_MW"] = 0
 
     return retired_cap
+
+
+def check_vre_profiles(
+    gen_df: pd.DataFrame,
+    gen_var_df: pd.DataFrame,
+    vre_cols: List[str] = ["VRE", "HYDRO"],
+):
+    """Check generation profiles of VRE resources to ensure they are variable. Alert the
+    user with a logger warning if any are not.
+
+    Parameters
+    ----------
+    gen_df : pd.DataFrame
+        Dataframe of generators. Must have column "Resource".
+    gen_var_df : pd.DataFrame
+        Dataframe of hourly generation for each resource. Column names are from the
+        "Resource" column of `gen_df`.
+    vre_cols : List[str]
+        List of boolean columns indicating inclusion in the group of variable resources.
+        By default, ["VRE", "HYDRO"].
+    """
+    var_gen_names = []
+    vre_cols = [c for c in vre_cols if c in gen_df.columns]
+    if vre_cols:
+        for c in vre_cols:
+            var_gen_names.extend(gen_df.loc[gen_df[c] == 1, "Resource"].to_list())
+
+        vre_std = gen_var_df[var_gen_names].std()
+        if (vre_std == 0).any():
+            non_variable = vre_std.loc[vre_std == 0].index.to_list()
+            logger.warning(
+                f"The variable resources {non_variable} have non-variable generation profiles."
+            )

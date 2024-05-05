@@ -8,6 +8,7 @@ from typing import Dict, List, Union
 from zipfile import BadZipFile
 
 os.environ["USE_PYGEOS"] = "0"
+
 import geopandas as gpd
 import numpy as np
 import pandas as pd
@@ -20,11 +21,7 @@ from scipy.stats import iqr
 from sklearn import cluster, preprocessing
 from xlrd import XLRDError
 
-from powergenome.cluster_method import (
-    cluster_by_owner,
-    cluster_kmeans,
-    weighted_ownership_by_unit,
-)
+from powergenome.cluster_method import cluster_by_owner
 from powergenome.co2_pipeline_cost import merge_co2_pipeline_costs
 from powergenome.eia_opendata import fetch_fuel_prices, modify_fuel_prices
 from powergenome.external_data import (
@@ -42,7 +39,7 @@ from powergenome.nrelatb import (
     fetch_atb_heat_rates,
     fetch_atb_offshore_spur_costs,
 )
-from powergenome.params import DATA_PATHS, IPM_GEOJSON_PATH, build_resource_clusters
+from powergenome.params import DATA_PATHS, build_resource_clusters
 from powergenome.price_adjustment import inflation_price_adjustment
 from powergenome.resource_clusters import map_eia_technology
 from powergenome.util import (
@@ -251,14 +248,14 @@ def startup_nonfuel_costs(df: pd.DataFrame, settings: dict) -> pd.DataFrame:
     DataFrame
         Modified df with new column "Start_Cost_per_MW"
     """
-    logger.info("Adding non-fuel startup costs")
+    logger.debug("Adding non-fuel startup costs")
     target_usd_year = settings.get("target_usd_year")
 
     vom_costs = settings.get("startup_vom_costs_mw", {})
     vom_usd_year = settings.get("startup_vom_costs_usd_year")
 
     if target_usd_year and vom_usd_year:
-        logger.info(
+        logger.debug(
             f"Changing non-fuel VOM costs from {vom_usd_year} to " f"{target_usd_year}"
         )
         for key, cost in vom_costs.items():
@@ -271,7 +268,7 @@ def startup_nonfuel_costs(df: pd.DataFrame, settings: dict) -> pd.DataFrame:
     startup_costs_usd_year = settings.get("startup_costs_per_cold_start_usd_year")
 
     if target_usd_year and startup_costs_usd_year:
-        logger.info(
+        logger.debug(
             f"Changing non-fuel startup costs from {vom_usd_year} to {target_usd_year}"
         )
         for key, cost in startup_costs.items():
@@ -380,7 +377,9 @@ def label_hydro_region(gens_860, pudl_engine, model_regions_gdf):
         (model_hydro["latitude"].isnull()) | (model_hydro["longitude"].isnull()), :
     ]
     if not no_lat_lon.empty:
-        print(no_lat_lon["summer_capacity_mw"].sum(), " MW without lat/lon")
+        logger.debug(
+            f"{no_lat_lon['summer_capacity_mw'].sum().round(1)}, MW without lat/lon"
+        )
     model_hydro = model_hydro.dropna(subset=["latitude", "longitude"])
 
     # Convert the lon/lat values to geo points. Need to add an initial CRS and then
@@ -539,12 +538,12 @@ def label_retirement_year(
 
     # Add additonal retirements from settings file
     if settings.get("additional_retirements") and add_additional_retirements:
-        logger.info("Changing retirement dates based on settings file")
+        logger.debug("Changing retirement dates based on settings file")
         model_year = settings["model_year"]
         start_ret_cap = df.loc[
             df["retirement_year"] <= model_year, settings["capacity_col"]
         ].sum()
-        logger.info(f"Starting retirement capacity is {start_ret_cap} MW")
+        logger.debug(f"Starting retirement capacity is {start_ret_cap} MW")
         i = 0
         ret_cap = 0
         for record in settings["additional_retirements"]:
@@ -566,7 +565,7 @@ def label_retirement_year(
         end_ret_cap = df.loc[
             df["retirement_year"] <= model_year, settings["capacity_col"]
         ].sum()
-        logger.info(f"Ending retirement capacity is {end_ret_cap} MW")
+        logger.debug(f"Ending retirement capacity is {end_ret_cap} MW")
         if not end_ret_cap > start_ret_cap:
             logger.debug(
                 "Adding retirements from settings didn't change the retiring capacity."
@@ -576,12 +575,12 @@ def label_retirement_year(
                 f"Retirement diff is {end_ret_cap - start_ret_cap}, adding retirements "
                 f"yields {ret_cap} MW"
             )
-        logger.info(
+        logger.debug(
             f"The retirement year for {i} plants, totaling {ret_cap} MW, was changed "
             "based on settings file parameters"
         )
     else:
-        logger.info("No retirement dates changed based on the settings file")
+        logger.debug("No retirement dates changed based on the settings file")
 
     end_len = len(df)
 
@@ -625,7 +624,7 @@ def label_small_hydro(df, settings, by=["plant_id_eia"]):
     start_len = len(df)
     size_cap = settings["small_hydro_mw"]
     cap_col = settings.get("capacity_col")
-    if not cap_col in df:
+    if cap_col not in df:
         cap_col = "capacity_mw"
 
     start_hydro_capacity = df.query(
@@ -846,13 +845,17 @@ def supplement_generator_860_data(
     ].sum()
     if not np.allclose(initial_capacity.sum(), merged_capacity.sum()):
         for i_idx, i_row in initial_capacity.iteritems():
-            if not np.allclose(i_row, merged_capacity[i_idx]):
-                logger.warning(
-                    "********************************\n"
+            if abs(i_row - merged_capacity[i_idx]) / i_row > 0.05:
+                logger.info(
                     "When adding plant entity/boiler info to generators and filling missing"
-                    " seasonal capacity values, technology"
+                    " seasonal capacity values, "
                     f"{i_idx} changed capacity from {i_row} to {merged_capacity[i_idx]}"
-                    "\n********************************"
+                )
+            if not np.allclose(i_row, merged_capacity[i_idx]):
+                logger.debug(
+                    "When adding plant entity/boiler info to generators and filling missing"
+                    " seasonal capacity values, "
+                    f"{i_idx} changed capacity from {i_row} to {merged_capacity[i_idx]}"
                 )
 
     return gens_860_model
@@ -1493,60 +1496,100 @@ def calc_unit_cluster_values(
     return df_values
 
 
-def add_genx_model_tags(df, settings):
-    """
+def add_resource_tags(
+    df: pd.DataFrame,
+    model_tag_values: Dict[str, Dict[str, int]],
+    regional_tag_values: Dict[str, Dict[str, Dict[str, int]]] = None,
+    model_tag_names: List[str] = None,
+    default_model_tag: Union[int, float, str] = 0,
+) -> pd.DataFrame:
+    """Add columns to the dataframe of resources and assign values based on technology
+    names. Can be boolean-type integers, floats, or strings. Different values can be
+    assigned by region.
+
     Each generator type needs to have certain tags for use by the GenX model. Each tag
     is a column, e.g. THERM for thermal generators. These columns and tag values are
-    defined in the settings file and applied here. Tags are (usually?) boolean 0/1
-    values.
+    defined in the settings file and applied here.
+
+    Keys representing technology names are sorted by length so that shorter names are
+    applied first. This prevents short or generic names like "nuclear" from overriding
+    more specific names like "nuclear_nuclear".
 
     Parameters
     ----------
-    df : dataframe
-        Clusters of generators. The index should have a column 'technology', which
-        is used to map tag values.
-    settings : dict
-        User-defined settings loaded from a YAML file.
+    df : pd.DataFrame
+        Each row represents one resource. Should have the column "technology",
+        and the column "region" if `regional_tag_values` is used.
+    model_tag_values : Dict[str, Dict[str, int]]
+        Mapping of values to technology names that will be assigned to a new column using
+        the key as the column name.
+    regional_tag_values : Dict[str, Dict[str, Dict[str, int]]]
+        Mapping of values to technology names within a given region that will be assigned
+        to a new column using the key as the column name.
+    model_tag_names : List[str], optional
+        List of tag names to either assign specific values or the default value, by default
+        None. Only necessary if a column is required but not specified within
+        `model_tag_values` or `regional_tag_values`.
+    default_model_tag : Union[int, float, str], optional
+        The default value used to fill within a column before assigning specific values to
+        each technology, by default 0
 
     Returns
     -------
-    dataframe
-        The original generator cluster results with new columns for each model tag.
+    pd.DataFrame
+        Modified version of the input df with new columns from the dictionary keys.
     """
+    if "technology" not in df.columns:
+        raise KeyError(
+            "The column 'techology' is required when adding model tag values."
+        )
+    if regional_tag_values is not None and "region" not in df.columns:
+        raise KeyError(
+            "When assigning regional model tags, the column 'region' is required."
+        )
+    _df = df.copy()
+    if model_tag_names is None:
+        model_tag_names = []
     ignored = r"_"
-    technology = df["technology"].str.replace(ignored, "")
-    # Create a new dataframe with the same index
-    default = settings.get("default_model_tag", 0)
-    for tag_col in settings.get("model_tag_names", []):
-        df[tag_col] = default
-        if tag_col not in settings.get("generator_columns", []) and isinstance(
-            settings.get("generator_columns"), list
-        ):
-            settings["generator_columns"].append(tag_col)
+    technology = _df["technology"].str.replace(ignored, "")
 
+    global_keys = list((model_tag_values or {}).keys())
+    regional_keys = []
+    for region, regional_tags in (regional_tag_values or {}).items():
+        regional_keys.extend(list(regional_tags.keys()))
+
+    # global_keys = list(set(global_keys + regional_keys))
+    # Create a new dataframe with the same index
+    tags_no_value = set(model_tag_names) - set(global_keys + regional_keys)
+    if tags_no_value:
+        logger.warning(
+            f"The model resource tags {tags_no_value} are listed in the settings parameter "
+            "'model_tags_name' but are not assigned values for any resources"
+        )
+    for tag_col in set(model_tag_names + global_keys + regional_keys):
+        _df.loc[:, tag_col] = default_model_tag
+    for tag_col in global_keys:
         try:
             for tech, tag_value in sorted(
-                settings["model_tag_values"][tag_col].items(),
+                model_tag_values[tag_col].items(),
                 key=lambda item: len(str(item[0])),
             ):
                 tech = re.sub(ignored, "", tech)
                 mask = technology.str.contains(rf"^{tech}", case=False)
-                df.loc[mask, tag_col] = tag_value
+                _df.loc[mask, tag_col] = tag_value
         except (KeyError, AttributeError) as e:
             logger.warning(f"No model tag values found for {tag_col} ({e})")
 
     # Change tags with specific regional values for a technology
-    flat_regional_tags = flatten(
-        sort_nested_dict(settings.get("regional_tag_values", {}) or {})
-    )
+    flat_regional_tags = flatten(sort_nested_dict(regional_tag_values or {}))
 
     for tag_tuple, tag_value in flat_regional_tags.items():
         region, tag_col, tech = tag_tuple
         tech = re.sub(ignored, "", tech)
         mask = technology.str.contains(rf"^{tech}", case=False)
-        df.loc[(df["region"] == region) & mask, tag_col] = tag_value
+        _df.loc[(_df["region"] == region) & mask, tag_col] = tag_value
 
-    return df
+    return _df
 
 
 def download_860m(settings: dict) -> pd.ExcelFile:
@@ -1565,7 +1608,10 @@ def download_860m(settings: dict) -> pd.ExcelFile:
     """
     fn = settings.get("eia_860m_fn")
     if not fn:
-        logger.info("Trying to determine the most recent EIA860m file...")
+        logger.info(
+            "Trying to determine the most recent EIA860m file. For reproducible results "
+            "use the settings parameter 'eia_860m_fn'."
+        )
         fn = find_newest_860m()
 
     engine = None
@@ -1581,15 +1627,17 @@ def download_860m(settings: dict) -> pd.ExcelFile:
 
     local_file = DATA_PATHS["eia_860m"] / fn
     if local_file.exists():
-        logger.info(f"Reading a local copy of the EIA860m file {fn}")
+        logger.debug(f"Reading a local copy of the EIA860m file {fn}")
         eia_860m = pd.ExcelFile(local_file)
     else:
-        logger.info(f"Downloading the EIA860m file {fn}")
+        logger.debug(f"Downloading the EIA860m file {fn}")
         try:
             download_save(url, local_file)
             eia_860m = pd.ExcelFile(local_file, engine=engine)
-        except (XLRDError, ValueError, BadZipFile):
-            logger.warning("A more recent version of EIA-860m is available")
+        except (XLRDError, ValueError, BadZipFile) as e:
+            logger.warning(
+                f"There was an error when downloading the EIA-860m file. Trying again {e}"
+            )
             download_save(archive_url, local_file)
             eia_860m = pd.ExcelFile(local_file, engine=engine)
         # write the file to disk
@@ -1764,7 +1812,6 @@ def label_gen_region(
 
     # Convert the lon/lat values to geo points. Need to add an initial CRS and then
     # change it to align with the IPM regions
-    print("Creating gdf")
     gdf = gpd.GeoDataFrame(
         df.copy(),
         geometry=gpd.points_from_xy(df.longitude.copy(), df.latitude.copy()),
@@ -1869,7 +1916,7 @@ def import_new_generators(
             settings.get("capacity_col", "capacity_mw"),
         ].sum()
 
-        logger.warning(
+        logger.debug(
             f"The EIA860 file has {len(plant_ids)} operating generator(s) without a technology "
             f"description. The plant IDs are {plant_ids}, and they have a combined "
             f"capcity of {plant_capacity} MW."
@@ -1882,7 +1929,9 @@ def import_new_generators(
             settings.get("tech_groups", {}) or {},
             settings.get("regional_no_grouping", {}) or {},
         )
-        print(new_operating["technology_description"].unique().tolist())
+        logger.debug(
+            f"Existing technology groups are {new_operating['technology_description'].unique().tolist()}"
+        )
 
     keep_cols = [
         "model_region",
@@ -1969,7 +2018,7 @@ def import_proposed_generators(
 
         planned_gdf = planned_gdf.append(plant_record, sort=False)
 
-    logger.info(
+    logger.debug(
         f"{len(additional_planned)} generators were added to the planned list based on settings"
     )
 
@@ -2008,7 +2057,7 @@ def import_proposed_generators(
             planned_gdf["technology_description"].isnull(), settings["capacity_col"]
         ].sum()
 
-        logger.warning(
+        logger.debug(
             f"The EIA860 file has {len(plant_ids)} proposed generator(s) without a technology "
             f"description. The plant IDs are {plant_ids}, and they have a combined "
             f"capcity of {plant_capacity} MW."
@@ -2029,7 +2078,9 @@ def import_proposed_generators(
             settings.get("tech_groups", {}) or {},
             settings.get("regional_no_grouping", {}) or {},
         )
-        print(planned_gdf["technology_description"].unique().tolist())
+        logger.debug(
+            f"Grouped planned technologies are {planned_gdf['technology_description'].unique().tolist()}"
+        )
 
     keep_cols = [
         "model_region",
@@ -2673,15 +2724,13 @@ def energy_storage_mwh(
     missing_techs = [t for t in partial_storage if t not in energy_storage_duration]
     if missing_techs:
         logger.warning(
-            "\n\n**************************\n"
             f"The storage technology(ies) {missing_techs} have some existing generators "
             "with energy capacity (MWh) values and some where the energy capacity is "
             "missing. You have not included these technologies in the settings parameter "
             "'energy_storage_duration', which is used to fill missing energy capacity "
             "data.\n\nNOTE: This is not a comprehensive list of technologies that *should* "
             "be included in 'energy_storage_duration'. Technologies without any existing "
-            "energy capacity data might also be missing.\n"
-            "**************************\n"
+            "energy capacity data might also be missing."
         )
     for tech, val in energy_storage_duration.items():
         if isinstance(val, dict):
@@ -2924,7 +2973,7 @@ class GeneratorClusters:
                 bga.report_date.dt.year.isin(self.data_years), :
             ].drop_duplicates(["plant_id_eia", "generator_id"])
 
-            logger.info("Loading map of plants to IPM regions")
+            logger.debug("Loading map of plants to IPM regions")
             self.plant_region_map = load_plant_region_map(
                 self.gens_860,
                 self.pudl_engine,
@@ -3006,6 +3055,7 @@ class GeneratorClusters:
         DataFrame
             One row for each region/DSM resource with values in all columns filled.
         """
+        logger.info("Creating flexible demand resources")
         year = self.settings["model_year"]
         df_list = []
         self.demand_response_profiles = {}
@@ -3025,7 +3075,7 @@ class GeneratorClusters:
             )
         if self.settings["flexible_demand_resources"][year] is None:
             logger.warning(
-                f"Your 'flexible_demand_resources' settings parameter has the value 'None' "
+                "Your 'flexible_demand_resources' settings parameter has the value 'None' "
                 "for this planning period. No flexible demand resources will be included."
             )
         for resource, parameters in (
@@ -3134,6 +3184,7 @@ class GeneratorClusters:
         dataframe
 
         """
+        logger.info("Compiling existing generators and their attributes")
         if self.gens_860.technology_description.isna().any():
             self.gens_860 = fill_missing_tech_descriptions(self.gens_860)
         self.gens_860_model = (
@@ -3174,14 +3225,14 @@ class GeneratorClusters:
         )
 
         # Add heat rates to the data we already have from 860
-        logger.info("Loading heat rate data for units and generator/fuel combinations")
+        logger.debug("Loading heat rate data for units and generator/fuel combinations")
         self.prime_mover_hr_map = plant_pm_heat_rates(self.annual_gen_hr_923)
         if self.weighted_unit_hr is None:
             self.weighted_unit_hr = unit_generator_heat_rates(
                 self.pudl_out, self.data_years
             )
         else:
-            logger.info("Using unit heat rates from previous round.")
+            logger.debug("Using unit heat rates from previous round.")
         self.weighted_unit_hr["unit_id_pg"] = self.weighted_unit_hr[
             "unit_id_pudl"
         ].astype("object")
@@ -3196,13 +3247,13 @@ class GeneratorClusters:
             how="left",
         ).set_index(idx)
 
-        logger.info(
+        logger.debug(
             f"Units model technologies are "
             f"{self.units_model.technology_description.unique().tolist()}"
         )
         # print(units_model.head())
 
-        logger.info(
+        logger.debug(
             "Assigning technology/fuel heat rates where unit heat rates are not "
             "available"
         )
@@ -3251,12 +3302,12 @@ class GeneratorClusters:
         # from IPython import embed
 
         # embed()
-        logger.info(
+        logger.debug(
             f"Units model technologies are "
             f"{self.units_model.technology_description.unique().tolist()}"
         )
         if self.supplement_with_860m:
-            logger.info(
+            logger.debug(
                 f"Before adding proposed generators, {len(self.units_model)} units with "
                 f"{self.units_model[self.settings['capacity_col']].sum()} MW capacity"
             )
@@ -3284,11 +3335,11 @@ class GeneratorClusters:
                 ]
             ).drop_duplicates(subset=["plant_id_eia", "model_region"])
             # embed()
-            logger.info(
+            logger.debug(
                 f"Proposed gen technologies are "
                 f"{self.proposed_gens.technology_description.unique().tolist()}"
             )
-            logger.info(
+            logger.debug(
                 f"{self.proposed_gens[self.settings['capacity_col']].sum()} MW proposed"
             )
             self.units_model = pd.concat(
@@ -3342,7 +3393,7 @@ class GeneratorClusters:
         ).values
         self.units_model.set_index(idx, inplace=True)
 
-        logger.info("Calculating plant O&M costs")
+        logger.debug("Calculating plant O&M costs")
         techs = self.settings["num_clusters"].keys()
         self.units_model = (
             self.units_model.rename(columns={"technology_description": "technology"})
@@ -3360,7 +3411,7 @@ class GeneratorClusters:
         #     f"After adding proposed, units model technologies are "
         #     f"{self.units_model.technology_description.unique().tolist()}"
         # )
-        logger.info(
+        logger.debug(
             f"After adding proposed generators, {len(self.units_model)} units with "
             f"{self.units_model[self.settings['capacity_col']].sum()} MW capacity"
         )
@@ -3392,19 +3443,30 @@ class GeneratorClusters:
         self.retired_index = self.retired.set_index(
             ["plant_id_eia", "unit_id_pg"]
         ).index
-        if self.settings.get("cluster_with_retired_gens", False) is True:
+        if (
+            self.multi_period
+            and self.settings.get("cluster_with_retired_gens", True) is True
+        ):
             logger.info(
-                "\n\nAge-retired gens are included for clustering to keep consistent "
-                "cluster assignments across periods. \n\n"
+                "Age-retired gens are included for clustering to keep consistent "
+                "cluster assignments across periods. "
+            )
+            region_tech_grouped = self.units_model.loc[
+                self.units_model.technology.isin(techs), :
+            ].groupby(["model_region", "technology"])
+        elif self.settings.get("cluster_with_retired_gens", False) is True:
+            logger.info(
+                "Age-retired gens are included for clustering to keep consistent "
+                "cluster assignments across periods."
             )
             region_tech_grouped = self.units_model.loc[
                 self.units_model.technology.isin(techs), :
             ].groupby(["model_region", "technology"])
         else:
             logger.info(
-                "\n\nAge-retired gens are NOT included for clustering. This may lead to "
+                "Age-retired gens are NOT included for clustering. This may lead to "
                 "inconsistent cluster assignments across periods. If you want to change "
-                "this behavior, add 'cluster_with_retired_gens: true' to your settings.\n\n"
+                "this behavior, add 'cluster_with_retired_gens: true' to your settings."
             )
             region_tech_grouped = self.units_model.loc[
                 (self.units_model.technology.isin(techs))
@@ -3473,11 +3535,9 @@ class GeneratorClusters:
                     ]
                     if len(grouped) < num_clusters[region][tech]:
                         s = f"""
-    *****************************
     The technology {tech} in region {region} has only {len(grouped)} operating units,
     which is less than the {num_clusters[region][tech]} clusters you specified.
     The number of clusters has been set equal to the number of units.
-    *****************************
                             """
                         logger.info(s)
                         num_clusters[region][tech] = len(grouped)
@@ -3570,9 +3630,9 @@ class GeneratorClusters:
             how="left",
         )
 
-        logger.info("Finalizing generation clusters")
+        # logger.info("Finalizing generation clusters")
         self.results = pd.concat(self.cluster_list)
-        logger.info(
+        logger.debug(
             f"Results technologies are {self.results.technology.unique().tolist()}"
         )
 
@@ -3665,11 +3725,11 @@ class GeneratorClusters:
         if self.settings.get("region_wind_pv_cap_fn"):
             from powergenome.external_data import overwrite_wind_pv_capacity
 
-            logger.info("Setting existing wind/pv using external file")
+            logger.debug("Setting existing wind/pv using external file")
             self.results = overwrite_wind_pv_capacity(self.results, self.settings)
 
         if self.settings.get("dg_as_resource"):
-            logger.info(
+            logger.debug(
                 "\n **************** \nDistributed generation is being added as generating"
                 " resources. The capacity of DG in each region is increased by "
                 f"{self.settings.get('avg_distribution_loss', 0):%} to account for no "
@@ -3691,11 +3751,17 @@ class GeneratorClusters:
             .pipe(startup_fuel, self.settings)
             .pipe(add_fuel_labels, self.fuel_prices, self.settings)
             .pipe(startup_nonfuel_costs, self.settings)
-            .pipe(add_genx_model_tags, self.settings)
+            .pipe(
+                add_resource_tags,
+                model_tag_values=self.settings.get("model_tag_values", {}),
+                regional_tag_values=self.settings.get("regional_tag_values", {}),
+                model_tag_names=self.settings.get("model_tag_names", []),
+                default_model_tag=self.settings.get("default_model_tag", {}),
+            )
         )
 
         if self.sort_gens:
-            logger.info("Sorting new resources alphabetically.")
+            logger.debug("Sorting new resources alphabetically.")
             self.results = self.results.sort_values(["region", "technology"])
 
         # self.results = self.results.rename(columns={"technology": "Resource"})
@@ -3760,7 +3826,7 @@ class GeneratorClusters:
             if len(groups) > 1:
                 # Multiple matching resource groups
                 raise ValueError(
-                    f"Multiple existing resource groups match EIA technology"
+                    "Multiple existing resource groups match EIA technology"
                     + row.technology
                 )
             group = groups[0]
@@ -3787,9 +3853,12 @@ class GeneratorClusters:
         # Drop old index cols from df
         self.results.drop(columns=["level_0", "index"], errors="ignore", inplace=True)
 
+        logger.info("Finished creating existing generator clusters")
+
         return self.results
 
     def create_new_generators(self):
+        logger.info("Starting to build new generation resources")
         self.offshore_spur_costs = fetch_atb_offshore_spur_costs(
             self.pg_engine, self.settings
         )
@@ -3809,7 +3878,7 @@ class GeneratorClusters:
             )
 
             if self.sort_gens:
-                logger.info("Sorting new resources alphabetically.")
+                logger.debug("Sorting new resources alphabetically.")
                 self.new_generators = self.new_generators.sort_values(
                     ["region", "technology"]
                 )
@@ -3831,7 +3900,13 @@ class GeneratorClusters:
             self.new_generators = pd.concat(
                 [self.new_generators, dr_rows], sort=False, ignore_index=True
             )
-        self.new_generators = add_genx_model_tags(self.new_generators, self.settings)
+        self.new_generators = add_resource_tags(
+            self.new_generators,
+            model_tag_values=self.settings.get("model_tag_values", {}),
+            regional_tag_values=self.settings.get("regional_tag_values", {}),
+            model_tag_names=self.settings.get("model_tag_names", []),
+            default_model_tag=self.settings.get("default_model_tag", {}),
+        )
         if "cluster" not in self.new_generators.columns:
             self.new_generators["cluster"] = 1
         self.new_generators["cluster"] = self.new_generators["cluster"].astype(
@@ -3844,6 +3919,8 @@ class GeneratorClusters:
             + "_"
             + self.new_generators["cluster"].astype(str)
         )
+
+        logger.info("Finished creating new generation resources")
 
         return self.new_generators
 
@@ -3891,7 +3968,7 @@ class GeneratorClusters:
         self.all_resources["R_ID"] = np.arange(len(self.all_resources)) + 1
 
         if self.current_gens:
-            logger.info(
+            logger.debug(
                 f"Capacity of {self.all_resources['Existing_Cap_MW'].sum()} MW in final clusters"
             )
 
