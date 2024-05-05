@@ -1362,12 +1362,12 @@ def group_units(df, settings):
     # add a unit code (plant plus generator code) in cases where one doesn't exist
     df_copy = df.reset_index()
 
-    #where operating date is not reported, assign operating date as the earliest of data years picked for clustering
-    df_copy.loc[:,"operating_date_fillna"] = df_copy.loc[:,"operating_date"].fillna(dt(min(settings["data_years"]),1,1))
-    df_copy.loc[ df_copy.loc[:,"operating_date"]==0,"operating_date_fillna"] = dt(min(settings["data_years"]),1,1)
-
-    #convert operating date to unix time to use in calculate the "mean" operating date
-    df_copy.loc[:,"operating_date_timestamp"] = df_copy.loc[:,"operating_date_fillna"].apply(lambda x: int(x.strftime('%s')))
+    # ARANYA EDITS where operating date is not reported, assign operating date as the earliest of data years picked for clustering
+    # df_copy.loc[:,"operating_date_fillna"] = df_copy.loc[:,"operating_date"].fillna(dt(min(settings["data_years"]),1,1))
+    # df_copy.loc[ df_copy.loc[:,"operating_date"]==0,"operating_date_fillna"] = dt(min(settings["data_years"]),1,1)
+    #
+    # #convert operating date to unix time to use in calculate the "mean" operating date
+    # df_copy.loc[:,"operating_date_timestamp"] = df_copy.loc[:,"operating_date_fillna"].apply(lambda x: int(x.strftime('%s')))
 
     # All units should have the same heat rate so taking the mean will just keep the
     # same value.
@@ -1379,14 +1379,14 @@ def group_units(df, settings):
             "heat_rate_mmbtu_mwh": "mean",
             "Fixed_OM_Cost_per_MWyr": "mean",
             "Var_OM_Cost_per_MWh": "mean",
-            "operating_date_timestamp": "mean",
+            # Aranya edit "operating_date_timestamp": "mean",
         }
     )
 
-    #calculate mean operating year for each cluster
-    grouped_units.loc[:,"operating_year"] = grouped_units.loc[:,"operating_date_timestamp"].apply(lambda x: dt.fromtimestamp(int(x)).year)
-    #drop the column operating_date_timestamp from final dataframe returned
-    grouped_units.drop(["operating_date_timestamp"],axis=1, inplace=True)
+    # ARANYA EDITS calculate mean operating year for each cluster
+    # grouped_units.loc[:,"operating_year"] = grouped_units.loc[:,"operating_date_timestamp"].apply(lambda x: dt.fromtimestamp(int(x)).year)
+    # #drop the column operating_date_timestamp from final dataframe returned
+    # grouped_units.drop(["operating_date_timestamp"],axis=1, inplace=True)
 
     grouped_units = grouped_units.replace([np.inf, -np.inf], np.nan)
     grouped_units = grouped_units.fillna(grouped_units.mean())
@@ -1463,10 +1463,10 @@ def calc_unit_cluster_values(
             "heat_rate_mmbtu_mwh": wm,
             "Fixed_OM_Cost_per_MWyr": wm,
             "Var_OM_Cost_per_MWh": wm,
-            "operating_year": wm,
+            # Aranya edits "operating_year": wm,
         }
     )
-    df_values = df_values.astype({"operating_year": int})
+    # Aranya Edits df_values = df_values.astype({"operating_year": int})
     df_values.index = df_values["cluster"].values
     if df_values["heat_rate_mmbtu_mwh"].isnull().values.any():
         print(df)
@@ -1484,7 +1484,7 @@ def calc_unit_cluster_values(
     df_values["Min_Power"] = df_values["minimum_load_mw"] / df_values[capacity_col]
 
     df_values["num_units"] = (
-        df.dropna(subset=capacity_col).groupby("cluster")["cluster"].count()
+        df.dropna(subset=[capacity_col]).groupby("cluster")["cluster"].count()
     )
 
     if technology:
